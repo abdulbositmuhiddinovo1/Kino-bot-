@@ -14,12 +14,22 @@ bot = telebot.TeleBot(TOKEN)
 def init_db():
     conn = sqlite3.connect('movies.db', check_same_thread=False)
     cursor = conn.cursor()
+    
+    # Kinolar jadvali
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS movies (
             code TEXT PRIMARY KEY,
             file_id TEXT
         )
     ''')
+    
+    # Foydalanuvchilar jadvali (YANGI O'ZGARISH)
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -43,6 +53,15 @@ Thread(target=run_flask).start()
 # /start buyrug'i
 @bot.message_handler(commands=['start'])
 def start(message):
+    user_id = message.chat.id
+    
+    # Foydalanuvchini bazaga saqlash (YANGI O'ZGARISH)
+    conn = sqlite3.connect('movies.db', check_same_thread=False)
+    cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (user_id,))
+    conn.commit()
+    conn.close()
+
     welcome_text = (
         "✨ *Assalomu alaykum, hurmatli foydalanuvchi!*\n\n"
         "🎬 *Kinolar olamiga xush kelibsiz!*\n\n"
@@ -50,39 +69,51 @@ def start(message):
     )
     bot.send_message(message.chat.id, welcome_text, parse_mode='Markdown')
 
+# Admin uchun /stat buyrug'i (YANGI O'ZGARISH)
+@bot.message_handler(commands=['stat'])
+def get_stats(message):
+    if message.from_user.id == ADMIN_ID:
+        conn = sqlite3.connect('movies.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute('SELECT COUNT(*) FROM users')
+        user_count = cursor.fetchone()[0]
+        conn.close()
+        
+        bot.reply_to(
+            message, 
+            f"📊 **Bot statistikasi:**\n\n👥 Barcha foydalanuvchilar: **{user_count} ta**", 
+            parse_mode='Markdown'
+        )
+    else:
+        bot.reply_to(message, "⚠️ Bu buyruq faqat admin uchun!")
+
 # Admin uchun /add buyrug'i
 @bot.message_handler(commands=['add'])
 def start_add_movie(message):
     if message.from_user.id == ADMIN_ID:
-        msg = bot.send_message(message.chat.id, "🎬 **Yangi kino kodini kiriting:**\n(Masalan: 101)", parse_mode="Markdown")
+        msg = bot.send_message(
+            message.chat.id, 
+            "🎬 **Yangi kino kodini kiting:**\n(Masalan: 101)", 
+            parse_mode="Markdown"
+        )
         bot.register_next_step_handler(msg, process_movie_code)
-    else:
-        bot.send_message(message.chat.id, "Siz admin emassiz!")
 
 def process_movie_code(message):
-    movie_code = message.text.strip()
-    msg = bot.send_message(message.chat.id, f"✅ Kod `{movie_code}` qabul qilindi.\n\nEndi kinoning **videosini yoki faylini** yuboring:", parse_mode="Markdown")
-    bot.register_next_step_handler(msg, process_movie_video, movie_code)
+    code = message.text.strip()
+    msg = bot.send_message(message.chat.id, f"📥 Endi `{code}` kodi uchun video faylni yuboring:", parse_mode="Markdown")
+    bot.register_next_step_handler(msg, process_movie_video, code)
 
-def process_movie_video(message, movie_code):
+def process_movie_video(message, code):
     if message.content_type == 'video':
         file_id = message.video.file_id
-    elif message.content_type == 'document':
-        file_id = message.document.file_id
-    else:
-        bot.send_message(message.chat.id, "❌ Iltimos, faqat video yoki fayl yuboring!")
-        return
-
-    conn = sqlite3.connect('movies.db', check_same_thread=False)
-    cursor = conn.cursor()
-    try:
-        cursor.execute("INSERT OR REPLACE INTO movies (code, file_id) VALUES (?, ?)", (movie_code, file_id))
+        conn = sqlite3.connect('movies.db', check_same_thread=False)
+        cursor = conn.cursor()
+        cursor.execute("INSERT OR REPLACE INTO movies (code, file_id) VALUES (?, ?)", (code, file_id))
         conn.commit()
-        bot.send_message(message.chat.id, f"🎉 **Kino saqlandi!**\nKodi: `{movie_code}`", parse_mode="Markdown")
-    except Exception as e:
-        bot.send_message(message.chat.id, f"Xatolik yuz berdi: {e}")
-    finally:
         conn.close()
+        bot.reply_to(message, f"✅ **Kino saqlandi!**\n🎬 Kodi: `{code}`", parse_mode='Markdown')
+    else:
+        bot.reply_to(message, "❌ Iltimos, faqat **video** yuboring!")
 
 # Oddiy video kelganda (caption'da kodi bo'lsa) saqlash
 @bot.message_handler(content_types=['video'])
@@ -90,13 +121,13 @@ def add_movie_by_caption(message):
     if message.from_user.id == ADMIN_ID and message.caption:
         code = message.caption.strip()
         file_id = message.video.file_id
-        
+
         conn = sqlite3.connect('movies.db', check_same_thread=False)
         cursor = conn.cursor()
         cursor.execute("INSERT OR REPLACE INTO movies (code, file_id) VALUES (?, ?)", (code, file_id))
         conn.commit()
         conn.close()
-        
+
         bot.reply_to(message, f"✅ **Kino saqlandi!**\n🎬 Kodi: `{code}`", parse_mode='Markdown')
 
 # Kinoni kodi bo'yicha qidirish (Eng oxirida turishi shart)
@@ -104,15 +135,22 @@ def add_movie_by_caption(message):
 def search_movie(message):
     code = message.text.strip()
     
+    # Qidiruv vaqtida ham foydalanuvchini saqlab qo'yish
     conn = sqlite3.connect('movies.db', check_same_thread=False)
     cursor = conn.cursor()
+    cursor.execute('INSERT OR IGNORE INTO users (user_id) VALUES (?)', (message.chat.id,))
     cursor.execute("SELECT file_id FROM movies WHERE code = ?", (code,))
     result = cursor.fetchone()
     conn.close()
 
     if result:
         file_id = result[0]
-        bot.send_video(message.chat.id, file_id, caption=f"🎬 *Kino kodi:* `{code}`\n✨ Yoqimli tomosha!", parse_mode='Markdown')
+        bot.send_video(
+            message.chat.id, 
+            file_id, 
+            caption=f"🎬 *Kino kodi:* `{code}`\n✨ Yoqimli tomosha!", 
+            parse_mode='Markdown'
+        )
     else:
         bot.reply_to(message, "❌ *Kechirasiz, bu kod bo'yicha kino topilmadi.*", parse_mode='Markdown')
 
@@ -120,3 +158,4 @@ def search_movie(message):
 if __name__ == '__main__':
     print("Bot ishga tushdi...")
     bot.infinity_polling(timeout=10, long_polling_timeout=5)
+        
